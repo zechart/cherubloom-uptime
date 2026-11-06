@@ -1,0 +1,52 @@
+# Source of record for the external uptime check. It does NOT run from this private repository (its Actions minutes
+# are exhausted most months and the monitor would stop silently): the file is published as
+# .github/workflows/uptime.yml in the PUBLIC repository zechart/cherubloom-uptime, where standard runners are free.
+# It holds only already-public URLs and no secret. See services/backup/README.md, "External uptime check".
+name: Production uptime
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *' # off the hour: GitHub drops jobs under the top-of-hour load
+    - cron: '11 5 * * 1' # weekly keepalive, see the last step
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: Fail on purpose to prove the failure email arrives
+        type: boolean
+        default: false
+permissions:
+  actions: write # only the keepalive step
+concurrency:
+  group: uptime
+defaults:
+  run:
+    shell: bash
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      CURL: curl -fsS --max-time 15 --retry 2 --retry-delay 30 --retry-all-errors
+    steps:
+      - name: Simulated failure
+        if: ${{ inputs.simulate_failure }}
+        run: exit 1
+      - name: API health
+        if: ${{ !cancelled() }}
+        run: |
+          body=$($CURL https://api.cherubloom.com/v1/health)
+          test "$(jq -r .status <<<"$body")" = ok
+      - name: Public site
+        if: ${{ !cancelled() }}
+        run: |
+          body=$($CURL https://cherubloom.com/)
+          grep -q 'Cherubloom' <<<"$body"
+      - name: Sign-in
+        if: ${{ !cancelled() }}
+        run: |
+          body=$($CURL https://auth.cherubloom.com/realms/cherubloom/.well-known/openid-configuration)
+          jq -e .issuer <<<"$body" >/dev/null
+      - name: Keep the schedule enabled (public repos disable it after 60 idle days)
+        if: ${{ !cancelled() && github.event.schedule == '11 5 * * 1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/uptime.yml/enable"
